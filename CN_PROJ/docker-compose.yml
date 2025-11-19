@@ -1,0 +1,114 @@
+version: '3.8'
+
+services:
+  # MySQL Database
+  mysql:
+    image: mysql:8.0
+    container_name: network_monitor_db
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: network_monitor
+      MYSQL_USER: monitor
+      MYSQL_PASSWORD: monitor_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - network_monitor_net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  # AI Prediction Service
+  ai_service:
+    build:
+      context: ./ai_service
+      dockerfile: Dockerfile
+    container_name: network_monitor_ai
+    environment:
+      - PYTHONUNBUFFERED=1
+      - MODEL_TYPE=lstm
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./ai_service:/app
+    networks:
+      - network_monitor_net
+    depends_on:
+      - mysql
+    command: python app.py
+
+  # Packet Capture Daemon
+  packet_sniffer:
+    build:
+      context: ./packet_capture
+      dockerfile: Dockerfile
+    container_name: network_monitor_sniffer
+    environment:
+      - PYTHONUNBUFFERED=1
+      - NETWORK_INTERFACE=eth0
+      - OUTPUT_FILE=/data/traffic_logs.csv
+    volumes:
+      - sniffer_data:/data
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+    networks:
+      - network_monitor_net
+    depends_on:
+      - mysql
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    privileged: true
+    command: python sniffer.py -i eth0 -o /data/traffic_logs.csv
+
+  # Main Application Server
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: network_monitor_web
+    environment:
+      - DATABASE_URL=mysql://monitor:monitor_password@mysql:3306/network_monitor
+      - NODE_ENV=production
+      - PORT=3000
+      - AI_SERVICE_URL=http://ai_service:8000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./client:/app/client
+      - ./server:/app/server
+    networks:
+      - network_monitor_net
+    depends_on:
+      mysql:
+        condition: service_healthy
+      ai_service:
+        condition: service_started
+    command: npm run dev
+
+  # Redis Cache (Optional, for real-time features)
+  redis:
+    image: redis:7-alpine
+    container_name: network_monitor_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - network_monitor_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      timeout: 3s
+      retries: 5
+
+networks:
+  network_monitor_net:
+    driver: bridge
+
+volumes:
+  mysql_data:
+  sniffer_data:
+  redis_data:
